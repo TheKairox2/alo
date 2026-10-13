@@ -1,0 +1,433 @@
+--!strict
+--[[
+	============================================================================
+	KAIROX HUB - All-in-One Multi-Tab Precision System & Visuals (ESP)
+	Place this single LocalScript inside: StarterPlayer -> StarterPlayerScripts
+	============================================================================
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+
+--------------------------------------------------------------------------------
+-- CONFIGURATION STATE
+--------------------------------------------------------------------------------
+local Config = {
+	-- Aimbot / Target Settings
+	AimbotEnabled = true,
+	MaxRange = 500.0,             -- Extended max targeting range (studs)
+	MaxScreenAngle = 180.0,       -- Maximum angle allowance
+	PredictionEnabled = true,
+	PredictionFactor = 0.2,
+	RequireLineOfSight = false,   -- Set false to target through walls / obstacles
+	
+	-- ESP / Visual Settings
+	EspEnabled = true,
+	EspFillColor = Color3.fromRGB(0, 255, 170),
+	EspOutlineColor = Color3.fromRGB(255, 255, 255),
+	EspFillTransparency = 0.5,
+	EspOutlineTransparency = 0.0,
+	
+	-- Controls
+	KeybindToggle = Enum.KeyCode.Q,
+	KeybindClear = Enum.KeyCode.C,
+}
+
+--------------------------------------------------------------------------------
+-- GLOBAL API (For moves/weapons to query precise target coordinates)
+--------------------------------------------------------------------------------
+_G.KairoxAim = {}
+
+local currentTarget: Model? = nil
+local calculatedTargetPosition = Vector3.new()
+local lastTargetPosition = Vector3.new()
+local lastTick = tick()
+
+function _G.KairoxAim.GetTargetPosition(): Vector3?
+	if not Config.AimbotEnabled or not currentTarget then return nil end
+	return calculatedTargetPosition
+end
+
+function _G.KairoxAim.GetTargetModel(): Model?
+	if not Config.AimbotEnabled then return nil end
+	return currentTarget
+end
+
+--------------------------------------------------------------------------------
+-- CLOSE-RANGE ENHANCED TARGET SELECTION LOGIC
+--------------------------------------------------------------------------------
+local function getCharacterRoot(character: Model?): BasePart?
+	if not character then return nil end
+	return character:FindFirstChild("HumanoidRootPart") :: BasePart?
+end
+
+local function findBestTarget(): Model?
+	if not Config.AimbotEnabled then return nil end
+
+	local localChar = LocalPlayer.Character
+	local localRoot = getCharacterRoot(localChar)
+	if not localRoot then return nil end
+
+	local viewportSize = Camera.ViewportSize
+	local screenCenter = Vector2.new(viewportSize.X / 2, viewportSize.Y / 2)
+
+	local bestTarget: Model? = nil
+	local closestScore = math.huge
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Character then
+			local char = player.Character
+			local humanoid = char:FindFirstChildOfClass("Humanoid")
+			local targetRoot = getCharacterRoot(char)
+
+			if humanoid and humanoid.Health > 0 and targetRoot then
+				local distance = (targetRoot.Position - localRoot.Position).Magnitude
+
+				if distance <= Config.MaxRange then
+					local hasSight = true
+					if Config.RequireLineOfSight then
+						local rayParams = RaycastParams.new()
+						rayParams.FilterType = Enum.RaycastFilterType.Exclude
+						rayParams.FilterDescendantsInstances = {localChar, char}
+						local rayResult = Workspace:Raycast(localRoot.Position, targetRoot.Position - localRoot.Position, rayParams)
+						if rayResult then hasSight = false end
+					end
+
+					if hasSight then
+						-- Close-range fix (< 20 studs): prioritize proximity over screen angle
+						if distance < 20.0 then
+							if distance < closestScore then
+								closestScore = distance
+								bestTarget = char
+							end
+						else
+							local screenPoint, onScreen = Camera:WorldToViewportPoint(targetRoot.Position)
+							if onScreen then
+								local screenPos2D = Vector2.new(screenPoint.X, screenPoint.Y)
+								local screenDist = (screenPos2D - screenCenter).Magnitude
+								
+								if screenDist < closestScore then
+									closestScore = screenDist
+									bestTarget = char
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+
+	return bestTarget
+end
+
+--------------------------------------------------------------------------------
+-- ESP (HIGHLIGHT) SYSTEM MANAGEMENT
+--------------------------------------------------------------------------------
+local activeHighlights: {[Player]: Highlight} = {}
+
+local function updateEsp()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer and player.Character then
+			local char = player.Character
+			local humanoid = char:FindFirstChildOfClass("Humanoid")
+			
+			if Config.EspEnabled and humanoid and humanoid.Health > 0 then
+				local highlight = activeHighlights[player]
+				if not highlight or highlight.Parent ~= char then
+					if highlight then highlight:Destroy() end
+					highlight = Instance.new("Highlight")
+					highlight.Name = "KairoxESP"
+					highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+					highlight.Parent = char
+					activeHighlights[player] = highlight
+				end
+				
+				highlight.FillColor = Config.EspFillColor
+				highlight.OutlineColor = Config.EspOutlineColor
+				highlight.FillTransparency = Config.EspFillTransparency
+				highlight.OutlineTransparency = Config.EspOutlineTransparency
+				highlight.Enabled = true
+			else
+				if activeHighlights[player] then
+					activeHighlights[player].Enabled = false
+				end
+			end
+		else
+			if activeHighlights[player] then
+				activeHighlights[player]:Destroy()
+				activeHighlights[player] = nil
+			end
+		end
+	end
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	if activeHighlights[player] then
+		activeHighlights[player]:Destroy()
+		activeHighlights[player] = nil
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- RUNTIME UPDATE LOOP
+--------------------------------------------------------------------------------
+RunService.RenderStepped:Connect(function(dt)
+	-- ESP Update
+	updateEsp()
+
+	-- Targeting Calculations
+	if not Config.AimbotEnabled then
+		currentTarget = nil
+		return
+	end
+
+	if currentTarget then
+		local humanoid = currentTarget:FindFirstChildOfClass("Humanoid")
+		local targetRoot = getCharacterRoot(currentTarget)
+		local localRoot = getCharacterRoot(LocalPlayer.Character)
+
+		if not humanoid or humanoid.Health <= 0 or not targetRoot or not localRoot or (targetRoot.Position - localRoot.Position).Magnitude > Config.MaxRange then
+			currentTarget = nil
+		end
+	end
+
+	if not currentTarget then
+		currentTarget = findBestTarget()
+	end
+
+	if currentTarget then
+		local targetRoot = getCharacterRoot(currentTarget)
+		if targetRoot then
+			local targetPos = targetRoot.Position
+
+			if Config.PredictionEnabled then
+				local currentTick = tick()
+				local timeDelta = currentTick - lastTick
+				if timeDelta > 0 then
+					local velocity = (targetPos - lastTargetPosition) / timeDelta
+					targetPos = targetPos + (velocity * Config.PredictionFactor)
+				end
+				lastTargetPosition = targetRoot.Position
+				lastTick = currentTick
+			end
+
+			calculatedTargetPosition = targetPos
+		end
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- USER INTERFACE WITH MULTI-TAB & DRAGGABLE FRAME
+--------------------------------------------------------------------------------
+local function createKairoxHubUI()
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "KairoxHubUI"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = PlayerGui
+
+	-- Open/Close Floating Button
+	local openBtn = Instance.new("TextButton")
+	openBtn.Name = "OpenButton"
+	openBtn.Size = UDim2.new(0, 140, 0, 40)
+	openBtn.Position = UDim2.new(0, 20, 0, 20)
+	openBtn.BackgroundColor3 = Color3.fromRGB(15, 15, 22)
+	openBtn.TextColor3 = Color3.fromRGB(0, 255, 170)
+	openBtn.Text = "Kairox Hub"
+	openBtn.Font = Enum.Font.GothamBold
+	openBtn.TextSize = 14
+	openBtn.Parent = screenGui
+
+	Instance.new("UICorner", openBtn).CornerRadius = UDim.new(0, 8)
+	local openStroke = Instance.new("UIStroke")
+	openStroke.Thickness = 1.5
+	openStroke.Color = Color3.fromRGB(0, 255, 170)
+	openStroke.Transparency = 0.3
+	openStroke.Parent = openBtn
+
+	-- Main Window Frame
+	local mainFrame = Instance.new("Frame")
+	mainFrame.Name = "MainFrame"
+	mainFrame.Size = UDim2.new(0, 360, 0, 260)
+	mainFrame.Position = UDim2.new(0, 20, 0, 70)
+	mainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 26)
+	mainFrame.Visible = false
+	mainFrame.Parent = screenGui
+
+	Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+	local mainStroke = Instance.new("UIStroke")
+	mainStroke.Thickness = 1.5
+	mainStroke.Color = Color3.fromRGB(45, 45, 60)
+	mainStroke.Parent = mainFrame
+
+	-- Top Drag Bar
+	local dragBar = Instance.new("Frame")
+	dragBar.Name = "DragBar"
+	dragBar.Size = UDim2.new(1, 0, 0, 38)
+	dragBar.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
+	dragBar.Parent = mainFrame
+	Instance.new("UICorner", dragBar).CornerRadius = UDim.new(0, 10)
+
+	local titleLabel = Instance.new("TextLabel")
+	titleLabel.Size = UDim2.new(1, -15, 1, 0)
+	titleLabel.Position = UDim2.new(0, 15, 0, 0)
+	titleLabel.BackgroundTransparency = 1
+	titleLabel.Text = "Kairox Hub"
+	titleLabel.TextColor3 = Color3.fromRGB(0, 255, 170)
+	titleLabel.Font = Enum.Font.GothamBold
+	titleLabel.TextSize = 14
+	titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+	titleLabel.Parent = dragBar
+
+	----------------------------------------------------------------------------
+	-- SMOOTH DRAGGING LOGIC
+	----------------------------------------------------------------------------
+	local dragging = false
+	local dragInput: InputObject? = nil
+	local dragStart = Vector3.new()
+	local startPos = UDim2.new()
+
+	dragBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = mainFrame.Position
+
+			input.Changed:Connect(function()
+				if input.UserInputState == Enum.UserInputState.End then
+					dragging = false
+				end
+			end)
+		end
+	end)
+
+	dragBar.InputChanged:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+			dragInput = input
+		end
+	end)
+
+	UserInputService.InputChanged:Connect(function(input)
+		if input == dragInput and dragging then
+			local delta = input.Position - dragStart
+			mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+		end
+	end)
+
+	----------------------------------------------------------------------------
+	-- TAB BUTTONS & CONTAINERS
+	----------------------------------------------------------------------------
+	local tabContainer = Instance.new("Frame")
+	tabContainer.Name = "TabButtons"
+	tabContainer.Size = UDim2.new(0, 95, 1, -38)
+	tabContainer.Position = UDim2.new(0, 0, 0, 38)
+	tabContainer.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+	tabContainer.Parent = mainFrame
+
+	local contentContainer = Instance.new("Frame")
+	contentContainer.Name = "Content"
+	contentContainer.Size = UDim2.new(1, -100, 1, -43)
+	contentContainer.Position = UDim2.new(0, 100, 0, 41)
+	contentContainer.BackgroundTransparency = 1
+	contentContainer.Parent = mainFrame
+
+	local tabs: {[string]: Frame} = {}
+	local tabButtons: {[string]: TextButton} = {}
+
+	local function createTab(tabName: string): Frame
+		local frame = Instance.new("Frame")
+		frame.Name = tabName .. "Tab"
+		frame.Size = UDim2.new(1, 0, 1, 0)
+		frame.BackgroundTransparency = 1
+		frame.Visible = false
+		frame.Parent = contentContainer
+
+		tabs[tabName] = frame
+		return frame
+	end
+
+	local aimbotTab = createTab("Aimbot")
+	local visualsTab = createTab("Visuals")
+	local settingsTab = createTab("Settings")
+
+	local function switchTab(selectedTab: string)
+		for name, frame in pairs(tabs) do
+			frame.Visible = (name == selectedTab)
+		end
+		for name, btn in pairs(tabButtons) do
+			if name == selectedTab then
+				btn.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+				btn.TextColor3 = Color3.fromRGB(0, 255, 170)
+			else
+				btn.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+				btn.TextColor3 = Color3.fromRGB(150, 150, 170)
+			end
+		end
+	end
+
+	local function createTabButton(tabName: string, yPos: number)
+		local btn = Instance.new("TextButton")
+		btn.Size = UDim2.new(1, 0, 0, 32)
+		btn.Position = UDim2.new(0, 0, 0, yPos)
+		btn.BackgroundColor3 = Color3.fromRGB(16, 16, 22)
+		btn.Text = tabName
+		btn.TextColor3 = Color3.fromRGB(150, 150, 170)
+		btn.Font = Enum.Font.GothamMedium
+		btn.TextSize = 12
+		btn.Parent = tabContainer
+
+		btn.MouseButton1Click:Connect(function()
+			switchTab(tabName)
+		end)
+
+		tabButtons[tabName] = btn
+	end
+
+	createTabButton("Aimbot", 10)
+	createTabButton("Visuals", 45)
+	createTabButton("Settings", 80)
+
+	----------------------------------------------------------------------------
+	-- TOGGLE UI COMPONENT CREATOR
+	----------------------------------------------------------------------------
+	local function addToggleRow(parentFrame: Frame, labelText: string, yPos: number, initialValue: boolean, callback: (boolean) -> ())
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(0, 150, 0, 28)
+		label.Position = UDim2.new(0, 5, 0, yPos)
+		label.BackgroundTransparency = 1
+		label.Text = labelText
+		label.TextColor3 = Color3.fromRGB(200, 200, 215)
+		label.Font = Enum.Font.GothamMedium
+		label.TextSize = 12
+		label.TextXAlignment = Enum.TextXAlignment.Left
+		label.Parent = parentFrame
+
+		local toggleBtn = Instance.new("TextButton")
+		toggleBtn.Size = UDim2.new(0, 60, 0, 24)
+		toggleBtn.Position = UDim2.new(1, -70, 0, yPos + 2)
+		toggleBtn.BackgroundColor3 = initialValue and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(55, 55, 65)
+		toggleBtn.Text = initialValue and "ON" or "OFF"
+		toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+		toggleBtn.Font = Enum.Font.GothamBold
+		toggleBtn.TextSize = 11
+		toggleBtn.Parent = parentFrame
+
+		Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
+
+		local state = initialValue
+		toggleBtn.MouseButton1Click:Connect(function()
+			state = not state
+			toggleBtn.BackgroundColor3 = state and Color3.fromRGB(0, 200, 100) or Color3.fromRGB(55, 55, 65)
+			toggleBtn.Text = state and "ON" or "OFF"
+			callback(state)
+		end)
+	end
+
+	-- Populate Aimbot Tab
+	addToggleRow(aimbotTab, "Aimbot Enabled", 10, Config.Aimbot
